@@ -140,7 +140,7 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<Redirect, Sta
 }
 
 async fn root(Query(payload): Query<CallbackSecondLoginArgs>) -> Result<Html<String>, StatusCode> {
-    let s = tokio::spawn(async {
+    let s = tokio::task::spawn_blocking(|| {
         let rng = rand::thread_rng();
         let s: String = rng
             .sample_iter(&Alphanumeric)
