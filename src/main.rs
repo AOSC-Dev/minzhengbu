@@ -1,9 +1,14 @@
+use std::{error::Error, io};
+
 use axum::{
     extract::Query,
+    http::StatusCode,
     response::{Html, Redirect},
     routing::get,
     Router,
 };
+use tracing::log::error;
+
 use dashmap::DashMap;
 use once_cell::sync::{Lazy, OnceCell};
 use rand::{distributions::Alphanumeric, Rng};
@@ -72,9 +77,8 @@ async fn main() {
     // build our application with a route
     let app = Router::new()
         // `GET /` goes to `root`
-        .route("/login", get(login))
+        .route_service("/login", get(login))
         .route("/", get(root))
-        .route("/error", get(error))
         .route("/login_from_telegram", get(login_from_telegram));
 
     // run our app with hyper, listening globally on port 3000
@@ -82,34 +86,40 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn login_from_telegram(Query(payload): Query<TelegramInfo>) -> String {
+async fn login_from_telegram(Query(payload): Query<TelegramInfo>) -> Result<String, StatusCode> {
     let TelegramInfo { telegram_id, rid } = payload;
 
-    let access_info = TEMP_MAP.get(&rid);
+    let access_info = TEMP_MAP.get(&rid).ok_or_else(|| {
+        let err = io::Error::new(
+            io::ErrorKind::Other,
+            "Could not find telegram access info by id: {rid}",
+        );
+        error!("{err}");
+        StatusCode::NOT_FOUND
+    })?;
 
-    match access_info {
-        Some(access_info) => {
-            let mut conn = DB_CONN.get().unwrap().to_owned();
-            let s = match serde_json::to_string(access_info.value()) {
-                Ok(s) => s,
-                Err(e) => return format!("Failed to serialize access info: {e}"),
-            };
-            match conn.set(telegram_id, s).await {
-                Ok(()) => {
-                    TEMP_MAP.remove(&rid);
-                    "Success".to_owned()
-                },
-                Err(e) => format!("Got Error: {e}"),
-            }
-        }
-        None => "Failed to get access info, You need to re-verify.".to_owned(),
-    }
+    let mut conn = DB_CONN
+        .get()
+        .ok_or_else(|| {
+            let err = io::Error::new(
+                io::ErrorKind::Other,
+                "Could not open redis database connection",
+            );
+            error(&err)
+        })?
+        .to_owned();
+
+    let s = serde_json::to_string(access_info.value()).map_err(|e| error(&e))?;
+
+    conn.set(telegram_id, s).await.map_err(|e| error(&e))
 }
 
-async fn login(Query(payload): Query<CallbackLoginArgs>) -> Redirect {
+async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<Redirect, StatusCode> {
     let CallbackLoginArgs { code } = payload;
 
-    let mut url = Url::parse("https://github.com/login/oauth/access_token").unwrap();
+    let mut url =
+        Url::parse("https://github.com/login/oauth/access_token").map_err(|e| error(&e))?;
+
     url.query_pairs_mut().extend_pairs(&[
         ("client_id", &*CLIENT_ID),
         ("client_secret", &*CLIENT_SECRET),
@@ -122,19 +132,19 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Redirect {
         .post(url)
         .send()
         .await
-        .and_then(|x| x.error_for_status());
+        .and_then(|x| x.error_for_status())
+        .map_err(|e| {
+            error!("{e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
-    match resp {
-        Ok(resp) => match resp.text().await {
-            Ok(s) => Redirect::permanent(&format!("/?{s}")),
-            Err(e) => Redirect::permanent(&format!("/error?err={e}")),
-        },
-        Err(e) => Redirect::permanent(&format!("/error?err={e}")),
-    }
+    let s = resp.text().await.map_err(|e| error(&e))?;
+
+    Ok(Redirect::permanent(&format!("/?{s}")))
 }
 
-async fn root(Query(payload): Query<CallbackSecondLoginArgs>) -> Html<String> {
-    let insert_temp_map = tokio::spawn(async {
+async fn root(Query(payload): Query<CallbackSecondLoginArgs>) -> Result<Html<String>, StatusCode> {
+    let s = tokio::spawn(async {
         let rng = rand::thread_rng();
         let s: String = rng
             .sample_iter(&Alphanumeric)
@@ -145,16 +155,17 @@ async fn root(Query(payload): Query<CallbackSecondLoginArgs>) -> Html<String> {
         TEMP_MAP.insert(s.clone(), payload);
 
         s
-    });
+    })
+    .await
+    .map_err(|e| error(&e))?;
 
-    match insert_temp_map.await {
-        Ok(s) => Html::from(format!(
-            "<a href=\"https://t.me/aosc_buildit_bot?start={s}\">Hit me!</a>"
-        )),
-        Err(e) => Html::from(format!("Got error: {e}")),
-    }
+    Ok(Html::from(format!(
+        "<a href=\"https://t.me/aosc_buildit_bot?start={s}\">Hit me!</a>"
+    )))
 }
 
-async fn error(Query(payload): Query<ErrMessage>) -> String {
-    payload.err
+fn error(err: &dyn Error) -> StatusCode {
+    error!("{err}");
+
+    StatusCode::INTERNAL_SERVER_ERROR
 }
