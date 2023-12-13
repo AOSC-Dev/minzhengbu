@@ -14,7 +14,7 @@ use once_cell::sync::{Lazy, OnceCell};
 use rand::{distributions::Alphanumeric, Rng};
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 use serde::{Deserialize, Serialize};
-use tracing_subscriber::{layer::SubscriberExt, fmt, EnvFilter, util::SubscriberInitExt};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use url::Url;
 
 #[derive(Deserialize, Debug)]
@@ -46,6 +46,7 @@ static CLIENT_SECRET: Lazy<String> =
     Lazy::new(|| std::env::var("GITHUB_CLIENT_SECRET").expect("GITHUB_CLIENT_SECRET is not set"));
 static REDIRECT_URL: Lazy<String> =
     Lazy::new(|| std::env::var("REDIRECT_URL").expect("REDIRECT_URL is not set"));
+static REDIS: Lazy<String> = Lazy::new(|| std::env::var("REDIS").expect("REDIS is not set"));
 
 static DB_CONN: OnceCell<MultiplexedConnection> = OnceCell::new();
 
@@ -62,6 +63,7 @@ async fn main() {
     let _ = &*CLIENT_ID;
     let _ = &*CLIENT_SECRET;
     let _ = &*REDIRECT_URL;
+    let _ = &*REDIS;
 
     let client =
         redis::Client::open("redis://127.0.0.1/").expect("Failed to connect redis database");
