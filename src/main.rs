@@ -131,7 +131,6 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Redirect {
 }
 
 async fn root(Query(payload): Query<CallbackSecondLoginArgs>) -> Html<String> {
-    // dbg!(payload);
     let insert_temp_map = tokio::spawn(async {
         let rng = rand::thread_rng();
         let s: String = rng
