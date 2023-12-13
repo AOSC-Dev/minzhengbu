@@ -14,6 +14,7 @@ use once_cell::sync::{Lazy, OnceCell};
 use rand::{distributions::Alphanumeric, Rng};
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 use serde::{Deserialize, Serialize};
+use tracing_subscriber::{layer::SubscriberExt, fmt, EnvFilter, util::SubscriberInitExt};
 use url::Url;
 
 #[derive(Deserialize, Debug)]
@@ -29,11 +30,6 @@ struct CallbackSecondLoginArgs {
     refresh_token_expires_in: i64,
     scope: String,
     token_type: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct ErrMessage {
-    err: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -56,7 +52,10 @@ static DB_CONN: OnceCell<MultiplexedConnection> = OnceCell::new();
 #[tokio::main]
 async fn main() {
     // initialize tracing
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(EnvFilter::from_default_env())
+        .init();
 
     // 加载环境变量
     dotenvy::dotenv().ok();
