@@ -95,7 +95,10 @@ async fn login_from_telegram(Query(payload): Query<TelegramInfo>) -> String {
                 Err(e) => return format!("Failed to serialize access info: {e}"),
             };
             match conn.set(telegram_id, s).await {
-                Ok(()) => "Success".to_owned(),
+                Ok(()) => {
+                    TEMP_MAP.remove(&rid);
+                    "Success".to_owned()
+                },
                 Err(e) => format!("Got Error: {e}"),
             }
         }
