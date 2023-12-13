@@ -132,10 +132,7 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<Redirect, Sta
         .send()
         .await
         .and_then(|x| x.error_for_status())
-        .map_err(|e| {
-            error!("{e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        .map_err(|e| error(&e))?;
 
     let s = resp.text().await.map_err(|e| error(&e))?;
 
