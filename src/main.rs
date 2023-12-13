@@ -64,8 +64,7 @@ async fn main() {
     let _ = &*CLIENT_SECRET;
     let _ = &*REDIRECT_URL;
 
-    let client =
-        redis::Client::open(REDIS.as_str()).expect("Failed to connect redis database");
+    let client = redis::Client::open(REDIS.as_str()).expect("Failed to connect redis database");
 
     let connect = client
         .get_multiplexed_tokio_connection()
