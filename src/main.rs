@@ -109,7 +109,10 @@ async fn login_from_telegram(Query(payload): Query<TelegramInfo>) -> Result<Stri
 
     let s = serde_json::to_string(access_info.value()).map_err(|e| error(&e))?;
 
-    conn.set(telegram_id, s).await.map_err(|e| error(&e))
+    conn.set(telegram_id, s).await.map_err(|e| error(&e))?;
+    TEMP_MAP.remove(&rid);
+
+    Ok("Successfully login".to_string())
 }
 
 async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<Redirect, StatusCode> {
