@@ -77,7 +77,7 @@ async fn main() {
     // build our application with a route
     let app = Router::new()
         // `GET /` goes to `root`
-        .route_service("/login", get(login))
+        .route("/login", get(login))
         .route("/", get(root))
         .route("/login_from_telegram", get(login_from_telegram));
 
