@@ -15,7 +15,6 @@ use rand::{distributions::Alphanumeric, Rng};
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use url::Url;
 
 #[derive(Deserialize, Debug)]
 struct CallbackLoginArgs {
@@ -116,19 +115,15 @@ async fn login_from_telegram(Query(payload): Query<TelegramInfo>) -> Result<Stri
 async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<Redirect, StatusCode> {
     let CallbackLoginArgs { code } = payload;
 
-    let mut url =
-        Url::parse("https://github.com/login/oauth/access_token").map_err(|e| error(&e))?;
-
-    url.query_pairs_mut().extend_pairs(&[
-        ("client_id", &*CLIENT_ID),
-        ("client_secret", &*CLIENT_SECRET),
-        ("code", &code),
-        ("redirect_uri", &*REDIRECT_URL),
-    ]);
-
     let client = reqwest::Client::new();
     let resp = client
-        .post(url)
+        .post("https://github.com/login/oauth/access_token")
+        .query(&[
+            ("client_id", &*CLIENT_ID),
+            ("client_secret", &*CLIENT_SECRET),
+            ("code", &code),
+            ("redirect_uri", &*REDIRECT_URL),
+        ])
         .send()
         .await
         .and_then(|x| x.error_for_status())
