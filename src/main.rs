@@ -3,7 +3,7 @@ use std::{error::Error, io};
 use axum::{
     extract::Query,
     http::{HeaderMap, StatusCode},
-    response::{Html, Redirect},
+    response::{Html, IntoResponse, Redirect},
     routing::get,
     Router,
 };
@@ -89,7 +89,9 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn login_from_telegram(Query(payload): Query<TelegramInfo>) -> Result<String, StatusCode> {
+async fn login_from_telegram(
+    Query(payload): Query<TelegramInfo>,
+) -> Result<impl IntoResponse, StatusCode> {
     let TelegramInfo { telegram_id, rid } = payload;
 
     let access_info = TEMP_MAP.get(&rid).ok_or_else(|| {
@@ -117,10 +119,13 @@ async fn login_from_telegram(Query(payload): Query<TelegramInfo>) -> Result<Stri
     conn.set(telegram_id, s).await.map_err(|e| error(&e))?;
     TEMP_MAP.remove(&rid);
 
-    Ok("Successfully login".to_string())
+    let mut headers = HeaderMap::new();
+    headers.insert("cache-contro", "no-cache".parse().unwrap());
+
+    Ok((headers, "Successfully login".to_string()))
 }
 
-async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<Redirect, StatusCode> {
+async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<impl IntoResponse, StatusCode> {
     let CallbackLoginArgs { code } = payload;
 
     let client = reqwest::Client::new();
@@ -139,10 +144,15 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<Redirect, Sta
 
     let s = resp.text().await.map_err(|e| error(&e))?;
 
-    Ok(Redirect::permanent(&format!("/?{s}")))
+    let mut headers = HeaderMap::new();
+    headers.insert("cache-contro", "no-cache".parse().unwrap());
+
+    Ok((headers, Redirect::permanent(&format!("/?{s}"))))
 }
 
-async fn root(Query(payload): Query<CallbackSecondLoginArgs>) -> Result<Html<String>, StatusCode> {
+async fn root(
+    Query(payload): Query<CallbackSecondLoginArgs>,
+) -> Result<impl IntoResponse, StatusCode> {
     let s = tokio::task::spawn_blocking(|| {
         let rng = rand::thread_rng();
         let s: String = rng
@@ -158,9 +168,15 @@ async fn root(Query(payload): Query<CallbackSecondLoginArgs>) -> Result<Html<Str
     .await
     .map_err(|e| error(&e))?;
 
-    Ok(Html::from(format!(
-        "<a href=\"https://t.me/aosc_buildit_bot?start={s}\">Hit me!</a>"
-    )))
+    let mut headers = HeaderMap::new();
+    headers.insert("cache-contro", "no-cache".parse().unwrap());
+
+    Ok((
+        headers,
+        Html::from(format!(
+            "<a href=\"https://t.me/aosc_buildit_bot?start={s}\">Hit me!</a>"
+        )),
+    ))
 }
 
 #[derive(Deserialize, Debug)]
@@ -171,7 +187,7 @@ struct TelegramId {
 async fn get_token(
     Query(payload): Query<TelegramId>,
     header: HeaderMap,
-) -> Result<String, StatusCode> {
+) -> Result<impl IntoResponse, StatusCode> {
     let secret = header.get("secret");
 
     if secret
@@ -193,7 +209,12 @@ async fn get_token(
 
     let res: Result<String, redis::RedisError> = conn.get(payload.id).await;
 
-    res.map_err(|e| error(&e))
+    let mut headers = HeaderMap::new();
+    headers.insert("cache-contro", "no-cache".parse().unwrap());
+
+    let s = res.map_err(|e| error(&e))?;
+
+    Ok((headers, s))
 }
 
 fn error(err: &dyn Error) -> StatusCode {
