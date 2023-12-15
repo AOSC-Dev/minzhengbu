@@ -159,6 +159,7 @@ async fn root(Query(payload): Query<CallbackSecondLoginArgs>) -> Result<Html<Str
     )))
 }
 
+#[derive(Deserialize, Debug)]
 struct TelegramId {
     id: String,
 }
