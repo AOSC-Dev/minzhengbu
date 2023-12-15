@@ -47,6 +47,8 @@ static REDIRECT_URL: Lazy<String> =
     Lazy::new(|| std::env::var("REDIRECT_URL").expect("REDIRECT_URL is not set"));
 static REDIS: Lazy<String> = Lazy::new(|| std::env::var("REDIS").expect("REDIS is not set"));
 static SECRET: Lazy<String> = Lazy::new(|| std::env::var("SECRET").expect("SECRET is not set"));
+static LOCAL_URL: Lazy<String> =
+    Lazy::new(|| std::env::var("LOCAL_URL").expect("LOCAL_URL is not set"));
 
 static DB_CONN: OnceCell<MultiplexedConnection> = OnceCell::new();
 
@@ -83,7 +85,7 @@ async fn main() {
         .route("/get_token", get(get_token));
 
     // run our app with hyper, listening globally on port 3000
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&*LOCAL_URL).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
