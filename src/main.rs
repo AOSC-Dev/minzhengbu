@@ -77,7 +77,8 @@ async fn main() {
         // `GET /` goes to `root`
         .route("/login", get(login))
         .route("/", get(root))
-        .route("/login_from_telegram", get(login_from_telegram));
+        .route("/login_from_telegram", get(login_from_telegram))
+        .route("/get_token", get(get_token));
 
     // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.unwrap();
@@ -156,6 +157,24 @@ async fn root(Query(payload): Query<CallbackSecondLoginArgs>) -> Result<Html<Str
     Ok(Html::from(format!(
         "<a href=\"https://t.me/aosc_buildit_bot?start={s}\">Hit me!</a>"
     )))
+}
+
+struct TelegramId {
+    id: String,
+}
+
+async fn get_token(Query(payload): Query<TelegramId>) -> Result<String, StatusCode> {
+    let mut conn = DB_CONN
+        .get()
+        .ok_or_else(|| {
+            let err = io::Error::new(io::ErrorKind::Other, "database connection does not exist");
+            error(&err)
+        })?
+        .to_owned();
+
+    let res: Result<String, redis::RedisError> = conn.get(payload.id).await;
+
+    res.map_err(|e| error(&e))
 }
 
 fn error(err: &dyn Error) -> StatusCode {
