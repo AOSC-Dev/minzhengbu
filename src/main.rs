@@ -2,7 +2,7 @@ use std::{error::Error, io};
 
 use axum::{
     extract::Query,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, Redirect},
     routing::get,
     Router,
@@ -46,6 +46,7 @@ static CLIENT_SECRET: Lazy<String> =
 static REDIRECT_URL: Lazy<String> =
     Lazy::new(|| std::env::var("REDIRECT_URL").expect("REDIRECT_URL is not set"));
 static REDIS: Lazy<String> = Lazy::new(|| std::env::var("REDIS").expect("REDIS is not set"));
+static SECRET: Lazy<String> = Lazy::new(|| std::env::var("SECRET").expect("SECRET is not set"));
 
 static DB_CONN: OnceCell<MultiplexedConnection> = OnceCell::new();
 
@@ -62,6 +63,7 @@ async fn main() {
     let _ = &*CLIENT_ID;
     let _ = &*CLIENT_SECRET;
     let _ = &*REDIRECT_URL;
+    let _ = &*SECRET;
 
     let client = redis::Client::open(REDIS.as_str()).expect("Failed to connect redis database");
 
@@ -164,7 +166,21 @@ struct TelegramId {
     id: String,
 }
 
-async fn get_token(Query(payload): Query<TelegramId>) -> Result<String, StatusCode> {
+async fn get_token(
+    Query(payload): Query<TelegramId>,
+    header: HeaderMap,
+) -> Result<String, StatusCode> {
+    let secret = header.get("secret");
+
+    if secret
+        .and_then(|x| x.to_str().ok())
+        .map(|x| x != &*SECRET)
+        .unwrap_or(true)
+    {
+        error!("Auth failed: secret not match");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     let mut conn = DB_CONN
         .get()
         .ok_or_else(|| {
