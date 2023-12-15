@@ -60,6 +60,8 @@ async fn main() {
         .with(EnvFilter::from_default_env())
         .init();
 
+    // console_subscriber::init();
+
     // 加载环境变量
     dotenvy::dotenv().ok();
     let _ = &*CLIENT_ID;
@@ -84,7 +86,6 @@ async fn main() {
         .route("/login_from_telegram", get(login_from_telegram))
         .route("/get_token", get(get_token));
 
-    // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind(&*LOCAL_URL).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
@@ -117,10 +118,12 @@ async fn login_from_telegram(
     let s = serde_json::to_string(access_info.value()).map_err(|e| error(&e))?;
 
     conn.set(telegram_id, s).await.map_err(|e| error(&e))?;
+
+    drop(access_info);
     TEMP_MAP.remove(&rid);
 
     let mut headers = HeaderMap::new();
-    headers.insert("cache-contro", "no-cache".parse().unwrap());
+    headers.insert("cache-control", "no-cache".parse().unwrap());
 
     Ok((headers, "Successfully login".to_string()))
 }
@@ -144,11 +147,26 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<impl IntoResp
 
     let s = resp.text().await.map_err(|e| error(&e))?;
 
+    // let querys = querify(&s);
+
     let mut headers = HeaderMap::new();
-    headers.insert("cache-contro", "no-cache".parse().unwrap());
+    headers.insert("cache-control", "no-cache".parse().unwrap());
 
     Ok((headers, Redirect::permanent(&format!("/?{s}"))))
 }
+
+// fn querify(string: &str) -> Vec<(&str, &str)> {
+//     let mut v = Vec::new();
+//     for pair in string.split('&') {
+//         let mut it = pair.split('=').take(2);
+//         let kv = match (it.next(), it.next()) {
+//             (Some(k), Some(v)) => (k, v),
+//             _ => continue,
+//         };
+//         v.push(kv);
+//     }
+//     v
+// }
 
 async fn root(
     Query(payload): Query<CallbackSecondLoginArgs>,
@@ -169,7 +187,7 @@ async fn root(
     .map_err(|e| error(&e))?;
 
     let mut headers = HeaderMap::new();
-    headers.insert("cache-contro", "no-cache".parse().unwrap());
+    headers.insert("cache-control", "no-cache".parse().unwrap());
 
     Ok((
         headers,
@@ -210,7 +228,7 @@ async fn get_token(
     let res: Result<String, redis::RedisError> = conn.get(payload.id).await;
 
     let mut headers = HeaderMap::new();
-    headers.insert("cache-contro", "no-cache".parse().unwrap());
+    headers.insert("cache-control", "no-cache".parse().unwrap());
 
     let s = res.map_err(|e| error(&e))?;
 
