@@ -95,7 +95,7 @@ async fn login_from_telegram(Query(payload): Query<TelegramInfo>) -> Result<Stri
     let access_info = TEMP_MAP.get(&rid).ok_or_else(|| {
         let err = io::Error::new(
             io::ErrorKind::Other,
-            "Could not find telegram access info by id: {rid}",
+            format!("Could not find telegram access info by id: {rid}"),
         );
         error!("{err}");
         StatusCode::NOT_FOUND
