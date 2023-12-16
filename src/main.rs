@@ -2,12 +2,12 @@ use std::{error::Error, io};
 
 use axum::{
     extract::Query,
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect},
     routing::get,
-    Router,
+    Json, Router,
 };
-use tracing::log::error;
+use tracing::{log::error, warn};
 
 use dashmap::DashMap;
 use once_cell::sync::{Lazy, OnceCell};
@@ -82,7 +82,6 @@ async fn main() {
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/login", get(login))
-        .route("/", get(root))
         .route("/login_from_telegram", get(login_from_telegram))
         .route("/get_token", get(get_token));
 
@@ -145,32 +144,54 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<impl IntoResp
         .and_then(|x| x.error_for_status())
         .map_err(|e| error(&e))?;
 
-    let s = resp.text().await.map_err(|e| error(&e))?;
+    let query = resp.text().await.map_err(|e| error(&e))?;
+    let map = querify(&query);
 
-    // let querys = querify(&s);
+    let mut access_token = None;
+    let mut expires_in = None;
+    let mut refresh_token = None;
+    let mut refresh_token_expires_in = None;
+    let mut scope = None;
+    let mut token_type = None;
 
-    let mut headers = HeaderMap::new();
-    headers.insert("cache-control", "no-cache".parse().unwrap());
+    for (k, v) in map {
+        match k {
+            "access_token" => access_token = Some(v),
+            "expires_in" => expires_in = Some(v),
+            "refresh_token" => refresh_token = Some(v),
+            "refresh_token_expires_in" => refresh_token_expires_in = Some(v),
+            "scope" => scope = Some(v),
+            "token_type" => token_type = Some(v),
+            x => {
+                warn!("Has invalid key '{x}: {v}'");
+                continue;
+            }
+        }
+    }
 
-    Ok((headers, Redirect::permanent(&format!("/?{s}"))))
-}
+    let login_args = CallbackSecondLoginArgs {
+        access_token: access_token
+            .ok_or_else(|| err_message("access_token does not exist"))?
+            .to_string(),
+        expires_in: expires_in
+            .ok_or_else(|| err_message("expires_in does not exist"))?
+            .parse::<i64>()
+            .map_err(|e| error(&e))?,
+        refresh_token: refresh_token
+            .ok_or_else(|| err_message("refresh_token does not exist"))?
+            .to_string(),
+        refresh_token_expires_in: refresh_token_expires_in
+            .ok_or_else(|| err_message("refresh_token_expires_in does not exist"))?
+            .parse::<i64>()
+            .map_err(|e| error(&e))?,
+        token_type: token_type
+            .ok_or_else(|| err_message("token_type does not exist"))?
+            .to_string(),
+        scope: scope
+            .ok_or_else(|| err_message("scope does not exist"))?
+            .to_string(),
+    };
 
-// fn querify(string: &str) -> Vec<(&str, &str)> {
-//     let mut v = Vec::new();
-//     for pair in string.split('&') {
-//         let mut it = pair.split('=').take(2);
-//         let kv = match (it.next(), it.next()) {
-//             (Some(k), Some(v)) => (k, v),
-//             _ => continue,
-//         };
-//         v.push(kv);
-//     }
-//     v
-// }
-
-async fn root(
-    Query(payload): Query<CallbackSecondLoginArgs>,
-) -> Result<impl IntoResponse, StatusCode> {
     let s = tokio::task::spawn_blocking(|| {
         let rng = rand::thread_rng();
         let s: String = rng
@@ -179,7 +200,7 @@ async fn root(
             .map(char::from)
             .collect();
 
-        TEMP_MAP.insert(s.clone(), payload);
+        TEMP_MAP.insert(s.clone(), login_args);
 
         s
     })
@@ -195,6 +216,26 @@ async fn root(
             "<a href=\"https://t.me/aosc_buildit_bot?start={s}\">Hit me!</a>"
         )),
     ))
+}
+
+fn err_message(err: &str) -> StatusCode {
+    error!("{err}");
+
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
+fn querify(string: &str) -> Vec<(&str, &str)> {
+    let mut v = Vec::new();
+    for pair in string.split('&') {
+        let mut it = pair.split('=').take(2);
+        let kv = match (it.next(), it.next()) {
+            (Some(k), Some(v)) => (k, v),
+            _ => continue,
+        };
+        v.push(kv);
+    }
+
+    v
 }
 
 #[derive(Deserialize, Debug)]
