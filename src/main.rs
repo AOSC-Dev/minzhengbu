@@ -2,10 +2,10 @@ use std::{error::Error, io};
 
 use axum::{
     extract::Query,
-    http::{header, HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Redirect},
+    http::{HeaderMap, StatusCode},
+    response::{Html, IntoResponse},
     routing::get,
-    Json, Router,
+    Router,
 };
 use tracing::{log::error, warn};
 
@@ -251,7 +251,7 @@ async fn get_token(
 
     if secret
         .and_then(|x| x.to_str().ok())
-        .map(|x| x != &*SECRET)
+        .map(|x| x != *SECRET)
         .unwrap_or(true)
     {
         error!("Auth failed: secret not match");
