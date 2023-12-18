@@ -83,10 +83,68 @@ async fn main() {
         // `GET /` goes to `root`
         .route("/login", get(login))
         .route("/login_from_telegram", get(login_from_telegram))
-        .route("/get_token", get(get_token));
+        .route("/get_token", get(get_token))
+        .route("/refresh_token", get(refresh_token));
 
     let listener = tokio::net::TcpListener::bind(&*LOCAL_URL).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn refresh_token(
+    headers: HeaderMap,
+    Query(payload): Query<TelegramId>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let TelegramId { id } = payload;
+
+    if !secret_check(&headers) {
+        error!("Auth failed: secret not match");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let mut conn = DB_CONN
+        .get()
+        .ok_or_else(|| {
+            let err = io::Error::new(io::ErrorKind::Other, "Database connection does not exist");
+            error(&err)
+        })?
+        .to_owned();
+
+    let res: Result<String, redis::RedisError> = conn.get(&id).await;
+    let s = res.map_err(|e| error(&e))?;
+    let res: CallbackSecondLoginArgs = serde_json::from_str(&s).map_err(|e| error(&e))?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://github.com/login/oauth/access_token")
+        .query(&[
+            ("client_id", &*CLIENT_ID.as_str()),
+            ("client_secret", &*CLIENT_SECRET),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &res.refresh_token),
+        ])
+        .send()
+        .await
+        .and_then(|x| x.error_for_status())
+        .map_err(|e| error(&e))?;
+
+    let login_args = format_github_query(resp.text().await.map_err(|e| error(&e))?)?;
+
+    let s = serde_json::to_string(&login_args).map_err(|e| error(&e))?;
+    conn.set(id, s).await.map_err(|e| error(&e))?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert("cache-control", "no-cache".parse().unwrap());
+
+    Ok((headers, "Successful refresh".to_string()))
+}
+
+fn secret_check(headers: &HeaderMap) -> bool {
+    let secret = headers.get("secret");
+
+    secret
+        .and_then(|x| x.to_str().ok())
+        .map(|x| x == *SECRET)
+        .unwrap_or(false)
 }
 
 async fn login_from_telegram(
@@ -124,7 +182,7 @@ async fn login_from_telegram(
     let mut headers = HeaderMap::new();
     headers.insert("cache-control", "no-cache".parse().unwrap());
 
-    Ok((headers, "Successfully login".to_string()))
+    Ok((headers, "Successful login".to_string()))
 }
 
 async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<impl IntoResponse, StatusCode> {
@@ -145,15 +203,42 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<impl IntoResp
         .map_err(|e| error(&e))?;
 
     let query = resp.text().await.map_err(|e| error(&e))?;
-    let map = querify(&query);
+    let login_args = format_github_query(query)?;
 
+    let s = tokio::task::spawn_blocking(|| {
+        let rng = rand::thread_rng();
+        let s: String = rng
+            .sample_iter(&Alphanumeric)
+            .take(20)
+            .map(char::from)
+            .collect();
+
+        TEMP_MAP.insert(s.clone(), login_args);
+
+        s
+    })
+    .await
+    .map_err(|e| error(&e))?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert("cache-control", "no-cache".parse().unwrap());
+
+    Ok((
+        headers,
+        Html::from(format!(
+            "<a href=\"https://t.me/aosc_buildit_bot?start={s}\">Hit me!</a>"
+        )),
+    ))
+}
+
+fn format_github_query(query: String) -> Result<CallbackSecondLoginArgs, StatusCode> {
+    let map = querify(&query);
     let mut access_token = None;
     let mut expires_in = None;
     let mut refresh_token = None;
     let mut refresh_token_expires_in = None;
     let mut scope = None;
     let mut token_type = None;
-
     for (k, v) in map {
         match k {
             "access_token" => access_token = Some(v),
@@ -192,30 +277,7 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<impl IntoResp
             .to_string(),
     };
 
-    let s = tokio::task::spawn_blocking(|| {
-        let rng = rand::thread_rng();
-        let s: String = rng
-            .sample_iter(&Alphanumeric)
-            .take(20)
-            .map(char::from)
-            .collect();
-
-        TEMP_MAP.insert(s.clone(), login_args);
-
-        s
-    })
-    .await
-    .map_err(|e| error(&e))?;
-
-    let mut headers = HeaderMap::new();
-    headers.insert("cache-control", "no-cache".parse().unwrap());
-
-    Ok((
-        headers,
-        Html::from(format!(
-            "<a href=\"https://t.me/aosc_buildit_bot?start={s}\">Hit me!</a>"
-        )),
-    ))
+    Ok(login_args)
 }
 
 fn err_message(err: &str) -> StatusCode {
@@ -245,15 +307,9 @@ struct TelegramId {
 
 async fn get_token(
     Query(payload): Query<TelegramId>,
-    header: HeaderMap,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let secret = header.get("secret");
-
-    if secret
-        .and_then(|x| x.to_str().ok())
-        .map(|x| x != *SECRET)
-        .unwrap_or(true)
-    {
+    if !secret_check(&headers) {
         error!("Auth failed: secret not match");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
