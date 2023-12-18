@@ -117,7 +117,7 @@ async fn refresh_token(
     let resp = client
         .post("https://github.com/login/oauth/access_token")
         .query(&[
-            ("client_id", &*CLIENT_ID.as_str()),
+            ("client_id", CLIENT_ID.as_str()),
             ("client_secret", &*CLIENT_SECRET),
             ("grant_type", "refresh_token"),
             ("refresh_token", &res.refresh_token),
