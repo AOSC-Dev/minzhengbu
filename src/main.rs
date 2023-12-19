@@ -14,7 +14,7 @@ use once_cell::sync::{Lazy, OnceCell};
 use rand::{distributions::Alphanumeric, Rng};
 use redis::{aio::MultiplexedConnection, AsyncCommands};
 use serde::{Deserialize, Serialize};
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 #[derive(Deserialize, Debug)]
 struct CallbackLoginArgs {
@@ -55,10 +55,15 @@ static DB_CONN: OnceCell<MultiplexedConnection> = OnceCell::new();
 #[tokio::main]
 async fn main() {
     // initialize tracing
-    tracing_subscriber::registry()
-        .with(fmt::layer())
-        .with(EnvFilter::from_default_env())
-        .init();
+    let env_log = EnvFilter::try_from_default_env();
+
+    if let Ok(filter) = env_log {
+        tracing_subscriber::registry()
+            .with(fmt::layer().with_filter(filter))
+            .init();
+    } else {
+        tracing_subscriber::registry().with(fmt::layer()).init();
+    }
 
     // console_subscriber::init();
 
