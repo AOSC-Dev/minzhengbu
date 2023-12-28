@@ -231,7 +231,7 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<impl IntoResp
     Ok((
         headers,
         Html::from(format!(
-            "<a href=\"https://t.me/aosc_buildit_bot?start={s}\">Hit me!</a>"
+            "<a href=\"https://t.me/aosc_buildit_bot?start={s}\">Please click on this link to complete authentication.</a>"
         )),
     ))
 }
