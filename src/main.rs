@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::get,
-    Router,
+    Json, Router,
 };
 use tracing::{log::error, warn};
 
@@ -87,6 +87,7 @@ async fn main() {
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/login", get(login))
+        .route("/login_cli", get(login_cli))
         .route("/login_from_telegram", get(login_from_telegram))
         .route("/get_token", get(get_token))
         .route("/refresh_token", get(refresh_token));
@@ -234,6 +235,34 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<impl IntoResp
             "<a href=\"https://t.me/aosc_buildit_bot?start={s}\">Please click on this link to complete authentication.</a>"
         )),
     ))
+}
+
+async fn login_cli(
+    Query(payload): Query<CallbackLoginArgs>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let CallbackLoginArgs { code } = payload;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://github.com/login/oauth/access_token")
+        .query(&[
+            ("client_id", &*CLIENT_ID),
+            ("client_secret", &*CLIENT_SECRET),
+            ("code", &code),
+            ("redirect_uri", &*REDIRECT_URL),
+        ])
+        .send()
+        .await
+        .and_then(|x| x.error_for_status())
+        .map_err(|e| error(&e))?;
+
+    let query = resp.text().await.map_err(|e| error(&e))?;
+    let login_args = format_github_query(query)?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert("cache-control", "no-cache".parse().unwrap());
+
+    Ok((headers, Json(login_args)))
 }
 
 fn format_github_query(query: String) -> Result<CallbackSecondLoginArgs, StatusCode> {
