@@ -762,7 +762,6 @@ dependencies = [
  "axum",
  "dashmap",
  "dotenvy",
- "once_cell",
  "rand",
  "redis",
  "reqwest",
