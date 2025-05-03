@@ -1,20 +1,20 @@
 use std::{error::Error, io};
 
 use axum::{
+    Json, Router,
     extract::Query,
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::get,
-    Json, Router,
 };
+use rand::{Rng, distr::Alphanumeric};
 use tracing::{log::error, warn};
 
 use dashmap::DashMap;
 use once_cell::sync::{Lazy, OnceCell};
-use rand::{distributions::Alphanumeric, Rng};
-use redis::{aio::MultiplexedConnection, AsyncCommands};
+use redis::{AsyncCommands, aio::MultiplexedConnection};
 use serde::{Deserialize, Serialize};
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Deserialize, Debug)]
 struct CallbackLoginArgs {
@@ -136,7 +136,7 @@ async fn refresh_token(
     let login_args = format_github_query(resp.text().await.map_err(|e| error(&e))?)?;
 
     let s = serde_json::to_string(&login_args).map_err(|e| error(&e))?;
-    conn.set(id, s).await.map_err(|e| error(&e))?;
+    let _: () = conn.set(&id, &s).await.map_err(|e| error(&e))?;
 
     let mut headers = HeaderMap::new();
     headers.insert("cache-control", "no-cache".parse().unwrap());
@@ -180,7 +180,7 @@ async fn login_from_telegram(
 
     let s = serde_json::to_string(access_info.value()).map_err(|e| error(&e))?;
 
-    conn.set(telegram_id, s).await.map_err(|e| error(&e))?;
+    let _: () = conn.set(telegram_id, s).await.map_err(|e| error(&e))?;
 
     drop(access_info);
     TEMP_MAP.remove(&rid);
@@ -212,7 +212,7 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<impl IntoResp
     let login_args = format_github_query(query)?;
 
     let s = tokio::task::spawn_blocking(|| {
-        let rng = rand::thread_rng();
+        let rng = rand::rng();
         let s: String = rng
             .sample_iter(&Alphanumeric)
             .take(20)
