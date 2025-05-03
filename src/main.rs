@@ -1,20 +1,21 @@
-use std::{error::Error, io};
+use std::sync::Arc;
 
+use anyhow::{Context, Result, anyhow};
 use axum::{
-    extract::Query,
+    Router,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse},
+    response::{Html, IntoResponse, Response},
     routing::get,
-    Json, Router,
 };
+use rand::{Rng, distr::Alphanumeric};
+use tokio::sync::Mutex;
 use tracing::{log::error, warn};
 
 use dashmap::DashMap;
-use once_cell::sync::{Lazy, OnceCell};
-use rand::{distributions::Alphanumeric, Rng};
-use redis::{aio::MultiplexedConnection, AsyncCommands};
+use redis::{AsyncCommands, aio::MultiplexedConnection};
 use serde::{Deserialize, Serialize};
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Deserialize, Debug)]
 struct CallbackLoginArgs {
@@ -37,20 +38,34 @@ struct TelegramInfo {
     rid: String,
 }
 
-static TEMP_MAP: Lazy<DashMap<String, CallbackSecondLoginArgs>> = Lazy::new(DashMap::new);
+#[derive(Debug, Clone)]
+struct AppState {
+    conn: Arc<Mutex<MultiplexedConnection>>,
+    client_id: String,
+    client_secret: String,
+    secret: String,
+    temp_kv: Arc<DashMap<String, CallbackSecondLoginArgs>>,
+    redirect_url: String,
+}
 
-static CLIENT_ID: Lazy<String> =
-    Lazy::new(|| std::env::var("GITHUB_CLIENT_ID").expect("GITHUB_CLIENT_ID is not set"));
-static CLIENT_SECRET: Lazy<String> =
-    Lazy::new(|| std::env::var("GITHUB_CLIENT_SECRET").expect("GITHUB_CLIENT_SECRET is not set"));
-static REDIRECT_URL: Lazy<String> =
-    Lazy::new(|| std::env::var("REDIRECT_URL").expect("REDIRECT_URL is not set"));
-static REDIS: Lazy<String> = Lazy::new(|| std::env::var("REDIS").expect("REDIS is not set"));
-static SECRET: Lazy<String> = Lazy::new(|| std::env::var("SECRET").expect("SECRET is not set"));
-static LOCAL_URL: Lazy<String> =
-    Lazy::new(|| std::env::var("LOCAL_URL").expect("LOCAL_URL is not set"));
+// learned from https://github.com/tokio-rs/axum/blob/main/examples/anyhow-error-response/src/main.rs
+pub struct AnyhowError(anyhow::Error);
 
-static DB_CONN: OnceCell<MultiplexedConnection> = OnceCell::new();
+impl IntoResponse for AnyhowError {
+    fn into_response(self) -> Response {
+        error!("Returning internal server error for {}", self.0);
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", self.0)).into_response()
+    }
+}
+
+impl<E> From<E> for AnyhowError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(err: E) -> Self {
+        Self(err.into())
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -67,76 +82,91 @@ async fn main() {
 
     // console_subscriber::init();
 
-    // 加载环境变量
     dotenvy::dotenv().ok();
-    let _ = &*CLIENT_ID;
-    let _ = &*CLIENT_SECRET;
-    let _ = &*REDIRECT_URL;
-    let _ = &*SECRET;
+    let client_id = std::env::var("GITHUB_CLIENT_ID").expect("GITHUB_CLIENT_ID is not set");
+    let client_secret =
+        std::env::var("GITHUB_CLIENT_SECRET").expect("GITHUB_CLIENT_SECRET is not set");
+    let redirect_url = std::env::var("REDIRECT_URL").expect("REDIRECT_URL is not set");
+    let redis = std::env::var("REDIS").expect("REDIS is not set");
+    let secret = std::env::var("SECRET").expect("SECRET is not set");
+    let local_url = std::env::var("LOCAL_URL").expect("LOCAL_URL is not set");
 
-    let client = redis::Client::open(REDIS.as_str()).expect("Failed to connect redis database");
-
-    let connect = client
-        .get_multiplexed_tokio_connection()
-        .await
-        .expect("Failed to get multiplexed connection");
-
-    DB_CONN.get_or_init(|| connect);
+    let client = redis::Client::open(&*redis).expect("Failed to connect redis database");
+    let connect = Arc::new(Mutex::new(
+        client
+            .get_multiplexed_tokio_connection()
+            .await
+            .expect("Failed to get multiplexed connection"),
+    ));
+    let temp_kv: Arc<DashMap<String, CallbackSecondLoginArgs>> = Arc::new(DashMap::new());
 
     // build our application with a route
     let app = Router::new()
-        // `GET /` goes to `root`
         .route("/login", get(login))
-        .route("/login_cli", get(login_cli))
         .route("/login_from_telegram", get(login_from_telegram))
         .route("/get_token", get(get_token))
-        .route("/refresh_token", get(refresh_token));
+        .route("/refresh_token", get(refresh_token))
+        .with_state(AppState {
+            conn: connect,
+            client_id,
+            client_secret,
+            secret,
+            temp_kv,
+            redirect_url,
+        });
 
-    let listener = tokio::net::TcpListener::bind(&*LOCAL_URL).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(local_url).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
 async fn refresh_token(
+    State(state): State<AppState>,
     headers: HeaderMap,
     Query(payload): Query<TelegramId>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, AnyhowError> {
+    let AppState {
+        conn,
+        client_id,
+        client_secret,
+        secret,
+        ..
+    } = state;
+
     let TelegramId { id } = payload;
 
-    if !secret_check(&headers) {
-        error!("Auth failed: secret not match");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    if !secret_check(&headers, &secret) {
+        return Err(anyhow!("secret not match").into());
     }
 
-    let mut conn = DB_CONN
-        .get()
-        .ok_or_else(|| {
-            let err = io::Error::new(io::ErrorKind::Other, "Database connection does not exist");
-            error(&err)
-        })?
-        .to_owned();
+    let res = {
+        let mut conn = conn.lock().await;
+        let res: Result<String, redis::RedisError> = conn.get(&id).await;
+        res
+    }?;
 
-    let res: Result<String, redis::RedisError> = conn.get(&id).await;
-    let s = res.map_err(|e| error(&e))?;
-    let res: CallbackSecondLoginArgs = serde_json::from_str(&s).map_err(|e| error(&e))?;
+    let res: CallbackSecondLoginArgs = serde_json::from_str(&res)?;
 
     let client = reqwest::Client::new();
     let resp = client
         .post("https://github.com/login/oauth/access_token")
         .query(&[
-            ("client_id", CLIENT_ID.as_str()),
-            ("client_secret", &*CLIENT_SECRET),
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
             ("grant_type", "refresh_token"),
             ("refresh_token", &res.refresh_token),
         ])
         .send()
         .await
-        .and_then(|x| x.error_for_status())
-        .map_err(|e| error(&e))?;
+        .and_then(|x| x.error_for_status())?;
 
-    let login_args = format_github_query(resp.text().await.map_err(|e| error(&e))?)?;
+    let login_args = format_github_query(resp.text().await?)?;
 
-    let s = serde_json::to_string(&login_args).map_err(|e| error(&e))?;
-    conn.set(id, s).await.map_err(|e| error(&e))?;
+    let s = serde_json::to_string(&login_args)?;
+
+    {
+        let mut conn = conn.lock().await;
+        let _: () = conn.set(&id, &s).await?;
+    }
 
     let mut headers = HeaderMap::new();
     headers.insert("cache-control", "no-cache".parse().unwrap());
@@ -144,46 +174,37 @@ async fn refresh_token(
     Ok((headers, "Successful refresh".to_string()))
 }
 
-fn secret_check(headers: &HeaderMap) -> bool {
+fn secret_check(headers: &HeaderMap, set_secret: &str) -> bool {
     let secret = headers.get("secret");
 
     secret
         .and_then(|x| x.to_str().ok())
-        .map(|x| x == *SECRET)
+        .map(|x| x == set_secret)
         .unwrap_or(false)
 }
 
 async fn login_from_telegram(
+    State(state): State<AppState>,
     Query(payload): Query<TelegramInfo>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, AnyhowError> {
     let TelegramInfo { telegram_id, rid } = payload;
 
-    let access_info = TEMP_MAP.get(&rid).ok_or_else(|| {
-        let err = io::Error::new(
-            io::ErrorKind::Other,
-            format!("Could not find telegram access info by id: {rid}"),
-        );
-        error!("{err}");
-        StatusCode::NOT_FOUND
-    })?;
+    let AppState { conn, temp_kv, .. } = state;
 
-    let mut conn = DB_CONN
-        .get()
-        .ok_or_else(|| {
-            let err = io::Error::new(
-                io::ErrorKind::Other,
-                "Could not open redis database connection",
-            );
-            error(&err)
-        })?
-        .to_owned();
+    let s = {
+        let access_info = temp_kv
+            .get(&rid)
+            .context("Could not find telegram access info by id: {rid}")?;
 
-    let s = serde_json::to_string(access_info.value()).map_err(|e| error(&e))?;
+        serde_json::to_string(access_info.value())?
+    };
 
-    conn.set(telegram_id, s).await.map_err(|e| error(&e))?;
+    {
+        let mut conn = conn.lock().await;
+        let _: () = conn.set(telegram_id, s).await?;
+    }
 
-    drop(access_info);
-    TEMP_MAP.remove(&rid);
+    temp_kv.remove(&rid);
 
     let mut headers = HeaderMap::new();
     headers.insert("cache-control", "no-cache".parse().unwrap());
@@ -191,40 +212,49 @@ async fn login_from_telegram(
     Ok((headers, "Successful login".to_string()))
 }
 
-async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<impl IntoResponse, StatusCode> {
+async fn login(
+    State(state): State<AppState>,
+    Query(payload): Query<CallbackLoginArgs>,
+) -> Result<impl IntoResponse, AnyhowError> {
     let CallbackLoginArgs { code } = payload;
+
+    let AppState {
+        temp_kv,
+        client_id,
+        client_secret,
+        redirect_url,
+        ..
+    } = state;
 
     let client = reqwest::Client::new();
     let resp = client
         .post("https://github.com/login/oauth/access_token")
         .query(&[
-            ("client_id", &*CLIENT_ID),
-            ("client_secret", &*CLIENT_SECRET),
-            ("code", &code),
-            ("redirect_uri", &*REDIRECT_URL),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("code", code),
+            ("redirect_uri", redirect_url),
         ])
         .send()
         .await
-        .and_then(|x| x.error_for_status())
-        .map_err(|e| error(&e))?;
+        .and_then(|x| x.error_for_status())?;
 
-    let query = resp.text().await.map_err(|e| error(&e))?;
+    let query = resp.text().await?;
     let login_args = format_github_query(query)?;
 
-    let s = tokio::task::spawn_blocking(|| {
-        let rng = rand::thread_rng();
+    let s = tokio::task::spawn_blocking(move || {
+        let rng = rand::rng();
         let s: String = rng
             .sample_iter(&Alphanumeric)
             .take(20)
             .map(char::from)
             .collect();
 
-        TEMP_MAP.insert(s.clone(), login_args);
+        temp_kv.insert(s.clone(), login_args);
 
         s
     })
-    .await
-    .map_err(|e| error(&e))?;
+    .await?;
 
     let mut headers = HeaderMap::new();
     headers.insert("cache-control", "no-cache".parse().unwrap());
@@ -237,35 +267,7 @@ async fn login(Query(payload): Query<CallbackLoginArgs>) -> Result<impl IntoResp
     ))
 }
 
-async fn login_cli(
-    Query(payload): Query<CallbackLoginArgs>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let CallbackLoginArgs { code } = payload;
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .post("https://github.com/login/oauth/access_token")
-        .query(&[
-            ("client_id", &*CLIENT_ID),
-            ("client_secret", &*CLIENT_SECRET),
-            ("code", &code),
-            ("redirect_uri", &*REDIRECT_URL),
-        ])
-        .send()
-        .await
-        .and_then(|x| x.error_for_status())
-        .map_err(|e| error(&e))?;
-
-    let query = resp.text().await.map_err(|e| error(&e))?;
-    let login_args = format_github_query(query)?;
-
-    let mut headers = HeaderMap::new();
-    headers.insert("cache-control", "no-cache".parse().unwrap());
-
-    Ok((headers, Json(login_args)))
-}
-
-fn format_github_query(query: String) -> Result<CallbackSecondLoginArgs, StatusCode> {
+fn format_github_query(query: String) -> Result<CallbackSecondLoginArgs> {
     let map = querify(&query);
     let mut access_token = None;
     let mut expires_in = None;
@@ -290,34 +292,24 @@ fn format_github_query(query: String) -> Result<CallbackSecondLoginArgs, StatusC
 
     let login_args = CallbackSecondLoginArgs {
         access_token: access_token
-            .ok_or_else(|| err_message("access_token does not exist"))?
+            .context("access_token does not exist")?
             .to_string(),
         expires_in: expires_in
-            .ok_or_else(|| err_message("expires_in does not exist"))?
+            .context("expires_in does not exist")?
             .parse::<i64>()
-            .map_err(|e| error(&e))?,
+            .context("failed parse expires_in to i64")?,
         refresh_token: refresh_token
-            .ok_or_else(|| err_message("refresh_token does not exist"))?
+            .context("refresh_token does not exist")?
             .to_string(),
         refresh_token_expires_in: refresh_token_expires_in
-            .ok_or_else(|| err_message("refresh_token_expires_in does not exist"))?
+            .context("refresh_token_expires_in does not exist")?
             .parse::<i64>()
-            .map_err(|e| error(&e))?,
-        token_type: token_type
-            .ok_or_else(|| err_message("token_type does not exist"))?
-            .to_string(),
-        scope: scope
-            .ok_or_else(|| err_message("scope does not exist"))?
-            .to_string(),
+            .context("failed parse refresh_token_expires_in to i64")?,
+        token_type: token_type.context("token_type does not exist")?.to_string(),
+        scope: scope.context("scope does not exist")?.to_string(),
     };
 
     Ok(login_args)
-}
-
-fn err_message(err: &str) -> StatusCode {
-    error!("{err}");
-
-    StatusCode::INTERNAL_SERVER_ERROR
 }
 
 fn querify(string: &str) -> Vec<(&str, &str)> {
@@ -340,34 +332,26 @@ struct TelegramId {
 }
 
 async fn get_token(
+    State(state): State<AppState>,
     Query(payload): Query<TelegramId>,
     headers: HeaderMap,
-) -> Result<impl IntoResponse, StatusCode> {
-    if !secret_check(&headers) {
-        error!("Auth failed: secret not match");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+) -> Result<impl IntoResponse, AnyhowError> {
+    let AppState { conn, secret, .. } = state;
+
+    if !secret_check(&headers, &secret) {
+        return Err(anyhow!("secret not match").into());
     }
 
-    let mut conn = DB_CONN
-        .get()
-        .ok_or_else(|| {
-            let err = io::Error::new(io::ErrorKind::Other, "database connection does not exist");
-            error(&err)
-        })?
-        .to_owned();
-
-    let res: Result<String, redis::RedisError> = conn.get(payload.id).await;
+    let res = {
+        let mut conn = conn.lock().await;
+        let res: Result<String, redis::RedisError> = conn.get(payload.id).await;
+        res
+    };
 
     let mut headers = HeaderMap::new();
     headers.insert("cache-control", "no-cache".parse().unwrap());
 
-    let s = res.map_err(|e| error(&e))?;
+    let s = res?;
 
     Ok((headers, s))
-}
-
-fn error(err: &dyn Error) -> StatusCode {
-    error!("{err}");
-
-    StatusCode::INTERNAL_SERVER_ERROR
 }
